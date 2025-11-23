@@ -194,10 +194,14 @@ export default function MoneyWizApp() {
     end: new Date().toISOString().split('T')[0] 
   });
 
-  // --- Filter & Import State ---
+  // --- Filter & Search State ---
   const [filterType, setFilterType] = useState('all');
   const [selectedTag, setSelectedTag] = useState(null);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(''); // New Search State
+  const [isSearchOpen, setIsSearchOpen] = useState(false); // New Search UI State
+
+  // --- Import State ---
   const [importStatus, setImportStatus] = useState(null); 
   const [importStep, setImportStep] = useState('idle'); 
   const [csvRawData, setCsvRawData] = useState({ headers: [], rows: [] });
@@ -218,25 +222,18 @@ export default function MoneyWizApp() {
     if (firebaseConfigStr && firebaseConfigStr.trim().length > 0) {
       try {
         let cleanConfig = firebaseConfigStr.trim();
-        // Remove "const firebaseConfig =" part if present
         if (cleanConfig.includes('=')) {
             cleanConfig = cleanConfig.substring(cleanConfig.indexOf('=') + 1).trim();
         }
-        // Remove trailing semicolon
         if (cleanConfig.endsWith(';')) {
             cleanConfig = cleanConfig.slice(0, -1);
         }
-
-        // Use Function constructor to parse JS object literal string
-        // This is safer than eval for this context and handles unquoted keys
         const config = (new Function("return " + cleanConfig))();
-        
-        // Initialize only if not already initialized or config changed
         const app = initializeApp(config);
         setAuth(getAuth(app));
         setDb(getFirestore(app));
         setIsFirebaseReady(true);
-        setConfigError(''); // Clear error on success
+        setConfigError(''); 
       } catch (e) {
         console.error("Firebase Init Error:", e);
         setConfigError('設定格式錯誤，請確保複製完整的 const firebaseConfig = { ... }; 內容');
@@ -272,7 +269,7 @@ export default function MoneyWizApp() {
             if (data.transactions) setTransactions(data.transactions);
             if (data.accounts) setAccounts(data.accounts);
             if (data.templates) setTemplates(data.templates);
-            if (data.rates) setRates(data.rates); // Sync rates too
+            if (data.rates) setRates(data.rates); 
         }
     }, (error) => console.error("Sync Error:", error));
     return () => unsubscribe();
@@ -323,31 +320,25 @@ export default function MoneyWizApp() {
 
   // --- Helper Functions ---
 
-  // Format any amount with a specific currency code (or default to display currency)
   const formatCurrency = useCallback((amount, currencyCode = displayCurrency) => {
-    const symbol = SUPPORTED_CURRENCIES.find(c => c.code === currencyCode)?.symbol || '$';
     return new Intl.NumberFormat('zh-TW', { 
       style: 'currency', 
       currency: currencyCode,
-      minimumFractionDigits: currencyCode === 'TWD' || currencyCode === 'JPY' ? 0 : 2
+      minimumFractionDigits: (currencyCode === 'TWD' || currencyCode === 'JPY') ? 0 : 2
     }).format(amount);
   }, [displayCurrency]);
 
-  // Convert amount from Account Currency -> Base TWD -> Display Currency
   const convertAmount = useCallback((amount, fromCurrency) => {
     if (fromCurrency === displayCurrency) return amount;
-    // Convert to TWD (Base) first
     const rateToTWD = rates[fromCurrency] || 1;
     const amountInTWD = amount * rateToTWD;
-    // Convert TWD to Display Currency
     const rateFromTWD = rates[displayCurrency] || 1;
     return amountInTWD / rateFromTWD;
   }, [displayCurrency, rates]);
 
-  // Calculate Net Worth in Display Currency
   const totalNetWorth = useMemo(() => {
     return accounts.reduce((acc, curr) => {
-      const accCurrency = curr.currency || 'TWD'; // Default to TWD if old data
+      const accCurrency = curr.currency || 'TWD'; 
       const val = convertAmount(curr.balance, accCurrency);
       return acc + val;
     }, 0);
@@ -372,7 +363,6 @@ export default function MoneyWizApp() {
     let expense = 0;
     transactions.forEach(t => {
       if (isTxInDashboardRange(t)) {
-        // Find transaction account currency
         const acc = accounts.find(a => a.id === t.accountId);
         const txCurrency = acc ? (acc.currency || 'TWD') : 'TWD';
         const convertedAmount = convertAmount(t.amount, txCurrency);
@@ -412,11 +402,20 @@ export default function MoneyWizApp() {
 
   const getFilteredTransactions = (accId = null) => {
     return transactions.filter(tx => {
+      // Filter Logic
       const typeMatch = filterType === 'all' || tx.type === filterType;
       const tagMatch = !selectedTag || (tx.tags && tx.tags.includes(selectedTag));
       let accountMatch = true;
       if (accId) accountMatch = tx.accountId === accId || tx.fromAccountId === accId || tx.toAccountId === accId;
-      return typeMatch && tagMatch && accountMatch;
+      
+      // Search Logic
+      const query = searchQuery.toLowerCase();
+      const noteMatch = (tx.note || '').toLowerCase().includes(query);
+      const categoryMatch = (tx.category || '').toLowerCase().includes(query);
+      const amountMatch = tx.amount.toString().includes(query);
+      const searchMatch = !searchQuery || noteMatch || categoryMatch || amountMatch;
+
+      return typeMatch && tagMatch && accountMatch && searchMatch;
     });
   };
 
@@ -437,7 +436,6 @@ export default function MoneyWizApp() {
   const applyTransactionToBalances = (currentAccounts, tx, multiplier = 1) => {
     return currentAccounts.map(acc => {
       let newBalance = acc.balance;
-      // Only modify balance if it matches account ID
       if (tx.type === 'expense' && acc.id === parseInt(tx.accountId)) {
         newBalance -= Number(tx.amount) * multiplier;
       } else if (tx.type === 'income' && acc.id === parseInt(tx.accountId)) {
@@ -445,7 +443,6 @@ export default function MoneyWizApp() {
       } else if (tx.type === 'transfer') {
         if (acc.id === parseInt(tx.fromAccountId)) newBalance -= Number(tx.amount) * multiplier;
         if (acc.id === parseInt(tx.toAccountId)) {
-            // Simplified transfer: Transfer amount applies directly to both.
             newBalance += Number(tx.amount) * multiplier;
         }
       }
@@ -730,9 +727,34 @@ export default function MoneyWizApp() {
       <div className="flex justify-between items-center mb-6 z-10 relative">
         <h2 className="text-2xl font-bold text-slate-800">交易明細</h2>
         <div className="flex space-x-2">
+           <button onClick={() => setIsSearchOpen(!isSearchOpen)} className={`p-2 rounded-lg transition-colors border flex items-center gap-2 text-sm font-medium ${isSearchOpen ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}><Search size={18} /></button>
           <button onClick={() => setIsFilterOpen(!isFilterOpen)} className={`p-2 rounded-lg transition-colors border flex items-center gap-2 text-sm font-medium ${isFilterOpen ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}><Filter size={18} /><span className="hidden sm:inline">過濾器</span>{(filterType !== 'all' || selectedTag) && <span className="w-2 h-2 rounded-full bg-red-500"></span>}</button>
         </div>
       </div>
+      
+      {/* Search Bar */}
+      {isSearchOpen && (
+        <div className="mb-4 bg-white p-3 rounded-xl border border-slate-200 shadow-sm animate-in slide-in-from-top-2 duration-200">
+             <div className="relative">
+                 <Search size={16} className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" />
+                 <input 
+                    type="text" 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="搜尋備註、分類或金額..."
+                    className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    autoFocus
+                 />
+                 {searchQuery && (
+                     <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                         <X size={14} />
+                     </button>
+                 )}
+             </div>
+        </div>
+      )}
+
+      {/* Filter Panel */}
       {isFilterOpen && (
         <div className="mb-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm animate-in slide-in-from-top-2 duration-200">
           <div className="flex flex-col md:flex-row gap-6">
@@ -765,7 +787,7 @@ export default function MoneyWizApp() {
       const rows = transactions.map(tx => {
         const acc = accounts.find(a => a.id === parseInt(tx.accountId));
         const txCur = acc ? (acc.currency || 'TWD') : 'TWD';
-        const displayAmount = convertAmount(tx.amount, txCur); // Convert to display currency for total calc
+        const displayAmount = convertAmount(tx.amount, txCur); 
         if (tx.type === 'income') totalIncome += displayAmount;
         if (tx.type === 'expense') totalExpense += displayAmount;
         
@@ -785,7 +807,56 @@ export default function MoneyWizApp() {
       link.click();
       document.body.removeChild(link);
     };
-    const handleImportCSV = (event) => { /* logic remains similar */ };
+    const handleImportCSV = (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                let text = e.target.result;
+                if (text.charCodeAt(0) === 0xFEFF) text = text.substr(1);
+
+                const lines = text.split('\n').filter(l => l.trim().length > 0);
+                if (lines.length < 2) throw new Error("檔案內容為空或格式錯誤");
+
+                const splitCSV = (str) => {
+                  const regex = /(?:^|,)(?:"([^"]*)"|([^,]*))/g;
+                  let matches = [];
+                  let match;
+                  while ((match = regex.exec(str)) !== null) {
+                    matches.push(match[1] !== undefined ? match[1] : match[2]);
+                  }
+                  return matches;
+                };
+
+                const headers = splitCSV(lines[0]);
+                const initialMapping = {};
+                const lowerHeaders = headers.map(h => h.toLowerCase());
+                const findHeader = (keywords) => lowerHeaders.findIndex(h => keywords.some(k => h.includes(k)));
+
+                initialMapping['date'] = findHeader(['date', '日期']);
+                initialMapping['time'] = findHeader(['time', '時間']);
+                initialMapping['type'] = findHeader(['type', '類型', '收支']);
+                initialMapping['amount'] = findHeader(['amount', '金額', 'price', 'cost']);
+                initialMapping['category'] = findHeader(['category', '類別', '分類']);
+                initialMapping['account'] = findHeader(['account', '帳戶', 'bank', 'wallet']);
+                initialMapping['note'] = findHeader(['note', '備註', '說明', 'description', 'desc']);
+                initialMapping['tags'] = findHeader(['tag', '標籤']);
+
+                setCsvRawData({ headers, rows: lines.slice(1) });
+                setColumnMapping(initialMapping);
+                setImportStep('column_mapping'); 
+                setImportStatus(null);
+
+            } catch (err) {
+                console.error(err);
+                setImportStatus({ type: 'error', message: '匯入失敗: ' + err.message });
+            }
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        };
+        reader.readAsText(file);
+    };
 
     return (
       <div className="space-y-6">
