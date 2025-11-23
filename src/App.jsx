@@ -36,7 +36,10 @@ import {
   MoreVertical,
   Star,
   Bookmark,
-  Info
+  Info,
+  Cloud,
+  CloudLightning,
+  Loader2
 } from 'lucide-react';
 
 // --- Mock Data & Constants ---
@@ -170,6 +173,11 @@ export default function MoneyWizApp() {
   const [currency, setCurrency] = useState(() => localStorage.getItem('wizmoney_currency') || 'TWD');
   const [exchangeRate, setExchangeRate] = useState(() => parseFloat(localStorage.getItem('wizmoney_rate')) || 32.5);
 
+  // Google Sheet Config State
+  const [googleSheetUrl, setGoogleSheetUrl] = useState(() => localStorage.getItem('wizmoney_gs_url') || '');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState(null);
+
   // Dashboard Time Range State
   const [dashboardRange, setDashboardRange] = useState('month'); // month, quarter, year, all, custom
   const [customDateRange, setCustomDateRange] = useState({ 
@@ -208,6 +216,10 @@ export default function MoneyWizApp() {
   useEffect(() => {
     localStorage.setItem('wizmoney_rate', exchangeRate.toString());
   }, [exchangeRate]);
+
+  useEffect(() => {
+    localStorage.setItem('wizmoney_gs_url', googleSheetUrl);
+  }, [googleSheetUrl]);
 
 
   // --- Helper Functions ---
@@ -964,12 +976,67 @@ export default function MoneyWizApp() {
     
     const handleResetData = () => {
         if (confirm('確定要刪除所有交易與帳戶資料並重置為預設值嗎？此動作無法復原。')) {
-            setTransactions(INITIAL_TRANSACTIONS);
-            setAccounts(INITIAL_ACCOUNTS);
-            setTemplates(INITIAL_TEMPLATES);
+            setTransactions([]); // Clear to empty
+            setAccounts([]); // Clear to empty
+            setTemplates([]); // Clear to empty
             setCurrency('TWD');
             localStorage.clear();
             alert('資料已重置');
+        }
+    };
+
+    // --- Google Sheet Cloud Sync ---
+    const handleCloudSave = async () => {
+        if (!googleSheetUrl) return alert('請先輸入 Google Apps Script 網址');
+        setIsSyncing(true);
+        setSyncMessage({ type: 'info', text: '正在上傳資料...' });
+
+        try {
+            const response = await fetch(googleSheetUrl, {
+                method: 'POST',
+                mode: 'no-cors', // GAS simple trigger limitation, response opaque
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'save_all',
+                    data: { transactions, accounts, templates }
+                })
+            });
+            // With no-cors, we can't read response, but if no error thrown, assume sent.
+            // Ideally user deploys as "Anyone", but browser still limits CORS reading sometimes.
+            // We'll just assume success if no network error.
+            setSyncMessage({ type: 'success', text: '資料已發送至雲端 (請檢查試算表)' });
+        } catch (error) {
+            setSyncMessage({ type: 'error', text: '上傳失敗: ' + error.message });
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+
+    const handleCloudLoad = async () => {
+        if (!googleSheetUrl) return alert('請先輸入 Google Apps Script 網址');
+        if (!confirm('確定要從雲端下載並覆蓋目前所有資料嗎？')) return;
+        
+        setIsSyncing(true);
+        setSyncMessage({ type: 'info', text: '正在下載資料...' });
+
+        try {
+            const response = await fetch(googleSheetUrl); // GET
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                const { transactions: txs, accounts: accs, templates: tpls } = result.data;
+                // Basic validation
+                if (Array.isArray(txs)) setTransactions(txs);
+                if (Array.isArray(accs)) setAccounts(accs);
+                if (Array.isArray(tpls)) setTemplates(tpls);
+                setSyncMessage({ type: 'success', text: '資料同步成功！' });
+            } else {
+                throw new Error(result.message || '未知錯誤');
+            }
+        } catch (error) {
+            setSyncMessage({ type: 'error', text: '下載失敗: ' + error.message });
+        } finally {
+            setIsSyncing(false);
         }
     };
 
@@ -1004,6 +1071,58 @@ export default function MoneyWizApp() {
                        ))}
                    </div>
                )}
+            </div>
+        </Card>
+
+        {/* Google Sheet Sync Settings */}
+        <Card className="p-6 border-green-100">
+            <h3 className="text-lg font-bold text-emerald-700 mb-4 flex items-center">
+                <CloudLightning size={20} className="mr-2" /> Google Sheets 雲端同步
+            </h3>
+            <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 space-y-4">
+                <div>
+                    <label className="block text-xs font-bold text-emerald-700 mb-1 uppercase">Google Apps Script 網址 (API URL)</label>
+                    <input 
+                        type="text" 
+                        value={googleSheetUrl}
+                        onChange={(e) => setGoogleSheetUrl(e.target.value)}
+                        className="block w-full px-3 py-2 bg-white border border-emerald-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-emerald-500 outline-none text-sm"
+                        placeholder="https://script.google.com/macros/s/..."
+                    />
+                    <p className="text-xs text-emerald-600/70 mt-1 flex items-center gap-1">
+                        <Info size={12} /> 請先在 Google 試算表建立 Apps Script 並部署為 Web App
+                    </p>
+                </div>
+
+                <div className="flex gap-3">
+                    <button 
+                        onClick={handleCloudSave}
+                        disabled={isSyncing || !googleSheetUrl}
+                        className={`flex-1 py-2 px-4 rounded-lg font-bold text-white text-sm flex items-center justify-center gap-2 shadow-sm transition-all
+                            ${isSyncing || !googleSheetUrl ? 'bg-slate-300 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 active:scale-95'}`}
+                    >
+                        {isSyncing ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
+                        上傳備份 (覆蓋雲端)
+                    </button>
+                    <button 
+                        onClick={handleCloudLoad}
+                        disabled={isSyncing || !googleSheetUrl}
+                        className={`flex-1 py-2 px-4 rounded-lg font-bold text-white text-sm flex items-center justify-center gap-2 shadow-sm transition-all
+                            ${isSyncing || !googleSheetUrl ? 'bg-slate-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 active:scale-95'}`}
+                    >
+                        {isSyncing ? <Loader2 size={16} className="animate-spin" /> : <Cloud size={16} />}
+                        下載還原 (覆蓋本機)
+                    </button>
+                </div>
+
+                {syncMessage && (
+                    <div className={`text-xs font-medium p-2 rounded flex items-center gap-2
+                        ${syncMessage.type === 'error' ? 'bg-red-100 text-red-700' : 
+                          syncMessage.type === 'success' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}`}>
+                        {syncMessage.type === 'success' ? <Check size={14} /> : syncMessage.type === 'error' ? <X size={14} /> : <RefreshCw size={14} className="animate-spin" />}
+                        {syncMessage.text}
+                    </div>
+                )}
             </div>
         </Card>
 
@@ -1196,11 +1315,16 @@ export default function MoneyWizApp() {
            const accountNameRaw = getValue('account');
 
            // Simple Account Matching (Name Match or Default)
-           let accountId = accounts[0].id;
-           if (accountNameRaw) {
+           let accountId = accounts.length > 0 ? accounts[0].id : null;
+           if (accountNameRaw && accounts.length > 0) {
               const acc = accounts.find(a => a.name === accountNameRaw || a.name.includes(accountNameRaw));
               if (acc) accountId = acc.id;
            }
+
+           // If no account exists, we can't import correctly without creating one.
+           // For simplicity, we skip or require user to create account first.
+           // Or we just import with a placeholder if accounts empty? No, better safe.
+           if (!accountId) continue; 
 
            parsedTransactions.push({
               id: Date.now() + i,
@@ -1216,7 +1340,7 @@ export default function MoneyWizApp() {
           setTransactions(prev => [...parsedTransactions, ...prev]);
           setImportStatus({ type: 'success', message: `成功匯入 ${parsedTransactions.length} 筆交易` });
         } else {
-          setImportStatus({ type: 'error', message: '未找到有效交易資料，請檢查對應欄位' });
+          setImportStatus({ type: 'error', message: '未找到有效交易資料，請檢查對應欄位或先建立帳戶' });
         }
         
       } catch(e) {
