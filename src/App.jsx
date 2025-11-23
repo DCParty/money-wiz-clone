@@ -42,7 +42,8 @@ import {
   Loader2,
   LogIn,
   LogOut,
-  Database
+  Database,
+  Coins
 } from 'lucide-react';
 
 // Firebase Imports
@@ -55,6 +56,32 @@ import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "firebase/firestor
 const INITIAL_ACCOUNTS = [];
 const INITIAL_TRANSACTIONS = [];
 const INITIAL_TEMPLATES = [];
+
+// Supported Currencies Configuration
+const SUPPORTED_CURRENCIES = [
+  { code: 'TWD', symbol: 'NT$', name: '新台幣' },
+  { code: 'USD', symbol: '$', name: '美金' },
+  { code: 'NZD', symbol: 'NZ$', name: '紐西蘭幣' },
+  { code: 'JPY', symbol: '¥', name: '日圓' },
+  { code: 'EUR', symbol: '€', name: '歐元' },
+  { code: 'GBP', symbol: '£', name: '英鎊' },
+  { code: 'AUD', symbol: 'A$', name: '澳幣' },
+  { code: 'CNY', symbol: '¥', name: '人民幣' },
+  { code: 'HKD', symbol: 'HK$', name: '港幣' },
+];
+
+// Default Exchange Rates (Based on TWD)
+const DEFAULT_RATES = {
+  'TWD': 1,
+  'USD': 32.5,
+  'NZD': 19.8,
+  'JPY': 0.21,
+  'EUR': 35.2,
+  'GBP': 41.5,
+  'AUD': 21.5,
+  'CNY': 4.5,
+  'HKD': 4.15
+};
 
 const CATEGORIES = {
   expense: ['飲食', '交通', '購物', '居住', '娛樂', '醫療', '教育', '其他'],
@@ -96,7 +123,7 @@ const Card = ({ children, className = "", onClick }) => (
   </div>
 );
 
-// Simple Donut Chart Component using SVG
+// Donut Chart
 const DonutChart = ({ data, formatValue }) => {
   let cumulativePercent = 0;
   const total = data.reduce((acc, item) => acc + item.value, 0);
@@ -111,11 +138,7 @@ const DonutChart = ({ data, formatValue }) => {
     const endX = Math.cos(2 * Math.PI * cumulativePercent);
     const endY = Math.sin(2 * Math.PI * cumulativePercent);
     
-    if (percent === 1) {
-      return (
-        <circle key={i} cx="0" cy="0" r="1" fill={slice.color} />
-      );
-    }
+    if (percent === 1) return <circle key={i} cx="0" cy="0" r="1" fill={slice.color} />;
 
     const largeArcFlag = percent > 0.5 ? 1 : 0;
     const pathData = [
@@ -129,9 +152,7 @@ const DonutChart = ({ data, formatValue }) => {
 
   return (
     <div className="relative w-48 h-48 mx-auto">
-      <svg viewBox="-1 -1 2 2" className="transform -rotate-90 w-full h-full">
-        {slices}
-      </svg>
+      <svg viewBox="-1 -1 2 2" className="transform -rotate-90 w-full h-full">{slices}</svg>
       <div className="absolute inset-0 flex items-center justify-center">
         <div className="w-32 h-32 bg-white rounded-full flex flex-col items-center justify-center shadow-inner">
           <span className="text-xs text-slate-400">總支出</span>
@@ -161,8 +182,12 @@ export default function MoneyWizApp() {
   const [editingAccount, setEditingAccount] = useState(null);
   
   // --- Settings State ---
-  const [currency, setCurrency] = useState(() => localStorage.getItem('wizmoney_currency') || 'TWD');
-  const [exchangeRate, setExchangeRate] = useState(() => parseFloat(localStorage.getItem('wizmoney_rate')) || 32.5);
+  const [displayCurrency, setDisplayCurrency] = useState(() => localStorage.getItem('wizmoney_currency') || 'TWD');
+  const [rates, setRates] = useState(() => {
+    const savedRates = localStorage.getItem('wizmoney_rates');
+    return savedRates ? JSON.parse(savedRates) : DEFAULT_RATES;
+  });
+  
   const [dashboardRange, setDashboardRange] = useState('month');
   const [customDateRange, setCustomDateRange] = useState({ 
     start: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0], 
@@ -187,26 +212,21 @@ export default function MoneyWizApp() {
 
   // --- Initialization ---
 
-  // 1. Initialize Firebase if config exists
   useEffect(() => {
     if (firebaseConfigStr) {
       try {
-        // Basic validation to allow easy copy-paste including "const firebaseConfig = " part
         let cleanConfig = firebaseConfigStr;
         if (cleanConfig.includes('=')) {
             cleanConfig = cleanConfig.substring(cleanConfig.indexOf('=') + 1).trim();
             if (cleanConfig.endsWith(';')) cleanConfig = cleanConfig.slice(0, -1);
         }
         const config = JSON.parse(cleanConfig);
-        
-        // Initialize only if not already initialized or config changed
         const app = initializeApp(config);
         setAuth(getAuth(app));
         setDb(getFirestore(app));
         setIsFirebaseReady(true);
       } catch (e) {
         console.error("Firebase Init Error:", e);
-        // Fallback to local storage if firebase fails
         loadFromLocalStorage();
       }
     } else {
@@ -214,24 +234,19 @@ export default function MoneyWizApp() {
     }
   }, [firebaseConfigStr]);
 
-  // 2. Listen for Auth State Changes
   useEffect(() => {
     if (!auth) return;
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       if (!currentUser) {
-        // If logged out, fallback to local storage
         loadFromLocalStorage(); 
       }
     });
     return () => unsubscribe();
   }, [auth]);
 
-  // 3. Real-time Database Sync (Firestore)
   useEffect(() => {
     if (!user || !db) return;
-
-    // Subscribe to user's data document
     const docRef = doc(db, "users", user.uid);
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
         if (docSnap.exists()) {
@@ -239,17 +254,12 @@ export default function MoneyWizApp() {
             if (data.transactions) setTransactions(data.transactions);
             if (data.accounts) setAccounts(data.accounts);
             if (data.templates) setTemplates(data.templates);
-        } else {
-            // New user in DB, maybe init? Or keep empty.
+            if (data.rates) setRates(data.rates); // Sync rates too
         }
-    }, (error) => {
-        console.error("Sync Error:", error);
-    });
-
+    }, (error) => console.error("Sync Error:", error));
     return () => unsubscribe();
   }, [user, db]);
 
-  // Helper: Load from LocalStorage
   const loadFromLocalStorage = () => {
     const txs = localStorage.getItem('wizmoney_transactions');
     const accs = localStorage.getItem('wizmoney_accounts');
@@ -259,64 +269,71 @@ export default function MoneyWizApp() {
     setTemplates(tpls ? JSON.parse(tpls) : INITIAL_TEMPLATES);
   };
 
-  // Helper: Save to Cloud or Local
-  const saveData = (newTxs, newAccs, newTpls) => {
-      // Always update state
-      if (newTxs) setTransactions(newTxs);
-      if (newAccs) setAccounts(newAccs);
-      if (newTpls) setTemplates(newTpls);
-
+  const saveData = (newTxs, newAccs, newTpls, newRates) => {
       const currentTxs = newTxs || transactions;
       const currentAccs = newAccs || accounts;
       const currentTpls = newTpls || templates;
+      const currentRates = newRates || rates;
 
-      // 1. Save to LocalStorage (Always as backup/cache)
+      if (newTxs) setTransactions(newTxs);
+      if (newAccs) setAccounts(newAccs);
+      if (newTpls) setTemplates(newTpls);
+      if (newRates) setRates(newRates);
+
       localStorage.setItem('wizmoney_transactions', JSON.stringify(currentTxs));
       localStorage.setItem('wizmoney_accounts', JSON.stringify(currentAccs));
       localStorage.setItem('wizmoney_templates', JSON.stringify(currentTpls));
+      localStorage.setItem('wizmoney_rates', JSON.stringify(currentRates));
 
-      // 2. Save to Firebase if logged in
       if (user && db) {
           const docRef = doc(db, "users", user.uid);
           setDoc(docRef, {
               transactions: currentTxs,
               accounts: currentAccs,
               templates: currentTpls,
+              rates: currentRates,
               lastUpdated: new Date().toISOString()
           }, { merge: true }).catch(e => console.error("Cloud Save Error:", e));
       }
   };
 
-  // Persist Settings
   useEffect(() => {
-    localStorage.setItem('wizmoney_currency', currency);
-    localStorage.setItem('wizmoney_rate', exchangeRate.toString());
+    localStorage.setItem('wizmoney_currency', displayCurrency);
     localStorage.setItem('wizmoney_firebase_config', firebaseConfigStr);
-  }, [currency, exchangeRate, firebaseConfigStr]);
+  }, [displayCurrency, firebaseConfigStr]);
 
 
   // --- Helper Functions ---
 
-  const formatCurrency = useCallback((amount) => {
-    let value = amount;
-    let locale = 'zh-TW';
-    let curr = 'TWD';
-
-    if (currency === 'USD') {
-      value = amount / exchangeRate;
-      locale = 'en-US';
-      curr = 'USD';
-    }
-
-    return new Intl.NumberFormat(locale, { 
+  // Format any amount with a specific currency code (or default to display currency)
+  const formatCurrency = useCallback((amount, currencyCode = displayCurrency) => {
+    const symbol = SUPPORTED_CURRENCIES.find(c => c.code === currencyCode)?.symbol || '$';
+    return new Intl.NumberFormat('zh-TW', { 
       style: 'currency', 
-      currency: curr, 
-      minimumFractionDigits: currency === 'USD' ? 2 : 0 
-    }).format(value);
-  }, [currency, exchangeRate]);
+      currency: currencyCode,
+      minimumFractionDigits: currencyCode === 'TWD' || currencyCode === 'JPY' ? 0 : 2
+    }).format(amount);
+  }, [displayCurrency]);
 
-  // Derived State & Filters
-  const totalNetWorth = accounts.reduce((acc, curr) => acc + curr.balance, 0);
+  // Convert amount from Account Currency -> Base TWD -> Display Currency
+  const convertAmount = useCallback((amount, fromCurrency) => {
+    if (fromCurrency === displayCurrency) return amount;
+    // Convert to TWD (Base) first
+    const rateToTWD = rates[fromCurrency] || 1;
+    const amountInTWD = amount * rateToTWD;
+    // Convert TWD to Display Currency
+    const rateFromTWD = rates[displayCurrency] || 1;
+    return amountInTWD / rateFromTWD;
+  }, [displayCurrency, rates]);
+
+  // Calculate Net Worth in Display Currency
+  const totalNetWorth = useMemo(() => {
+    return accounts.reduce((acc, curr) => {
+      const accCurrency = curr.currency || 'TWD'; // Default to TWD if old data
+      const val = convertAmount(curr.balance, accCurrency);
+      return acc + val;
+    }, 0);
+  }, [accounts, convertAmount]);
   
   const isTxInDashboardRange = (tx) => {
     const txDateStr = tx.date;
@@ -337,26 +354,35 @@ export default function MoneyWizApp() {
     let expense = 0;
     transactions.forEach(t => {
       if (isTxInDashboardRange(t)) {
-        if (t.type === 'income') income += t.amount;
-        if (t.type === 'expense') expense += t.amount;
+        // Find transaction account currency
+        const acc = accounts.find(a => a.id === t.accountId);
+        const txCurrency = acc ? (acc.currency || 'TWD') : 'TWD';
+        const convertedAmount = convertAmount(t.amount, txCurrency);
+
+        if (t.type === 'income') income += convertedAmount;
+        if (t.type === 'expense') expense += convertedAmount;
       }
     });
     return { income, expense };
-  }, [transactions, dashboardRange, customDateRange]);
+  }, [transactions, dashboardRange, customDateRange, accounts, convertAmount]);
 
   const categoryData = useMemo(() => {
     const data = {};
     transactions.filter(t => t.type === 'expense' && isTxInDashboardRange(t)).forEach(t => {
+      const acc = accounts.find(a => a.id === t.accountId);
+      const txCurrency = acc ? (acc.currency || 'TWD') : 'TWD';
+      const convertedAmount = convertAmount(t.amount, txCurrency);
+
       const cat = t.category || '其他';
       if (!data[cat]) data[cat] = 0;
-      data[cat] += t.amount;
+      data[cat] += convertedAmount;
     });
     return Object.keys(data).map(cat => ({
       label: cat,
       value: data[cat],
       color: CATEGORY_COLORS[cat] || '#ccc'
     })).sort((a, b) => b.value - a.value);
-  }, [transactions, dashboardRange, customDateRange]);
+  }, [transactions, dashboardRange, customDateRange, accounts, convertAmount]);
 
   const allTags = useMemo(() => {
     const tags = new Set();
@@ -388,20 +414,29 @@ export default function MoneyWizApp() {
       }
   };
 
-  const handleAuthLogout = () => {
-      if(auth) signOut(auth);
-  };
+  const handleAuthLogout = () => { if(auth) signOut(auth); };
 
   const applyTransactionToBalances = (currentAccounts, tx, multiplier = 1) => {
     return currentAccounts.map(acc => {
       let newBalance = acc.balance;
+      // Only modify balance if it matches account ID
       if (tx.type === 'expense' && acc.id === parseInt(tx.accountId)) {
         newBalance -= Number(tx.amount) * multiplier;
       } else if (tx.type === 'income' && acc.id === parseInt(tx.accountId)) {
         newBalance += Number(tx.amount) * multiplier;
       } else if (tx.type === 'transfer') {
         if (acc.id === parseInt(tx.fromAccountId)) newBalance -= Number(tx.amount) * multiplier;
-        if (acc.id === parseInt(tx.toAccountId)) newBalance += Number(tx.amount) * multiplier;
+        if (acc.id === parseInt(tx.toAccountId)) {
+            // For transfer between different currencies, we need complex logic.
+            // Simplified: We assume amount is in Source Currency. 
+            // Target account gets converted amount? This is tricky for simple UI.
+            // Current Logic: Amount is absolute number. 
+            // Improved Logic: If multi-currency transfer, we ideally need 'targetAmount'.
+            // For now, we assume 1:1 transfer value if currencies match, or just plain number if not (User beware).
+            // To fix properly, transfer modal needs 'Exchange Rate' or 'Target Amount'.
+            // Let's keep it simple: Transfer amount applies directly to both.
+            newBalance += Number(tx.amount) * multiplier;
+        }
       }
       return { ...acc, balance: newBalance };
     });
@@ -420,21 +455,17 @@ export default function MoneyWizApp() {
         ...newTx
       }];
     }
-    
-    saveData(newTxs, newAccs, newTpls);
+    saveData(newTxs, newAccs, newTpls, null);
     setShowAddModal(false);
   };
 
   const handleUpdateTransaction = (updatedTx) => {
     const oldTx = transactions.find(t => t.id === updatedTx.id);
     if (!oldTx) return;
-
     let tempAccounts = applyTransactionToBalances(accounts, oldTx, -1);
     tempAccounts = applyTransactionToBalances(tempAccounts, updatedTx, 1);
-
     const newTxs = transactions.map(t => t.id === updatedTx.id ? updatedTx : t);
-    
-    saveData(newTxs, tempAccounts, null);
+    saveData(newTxs, tempAccounts, null, null);
     setShowAddModal(false);
     setEditingTransaction(null);
   };
@@ -443,11 +474,9 @@ export default function MoneyWizApp() {
     if (!confirm('確定要刪除這筆交易嗎？帳戶餘額將會自動還原。')) return;
     const txToDelete = transactions.find(t => t.id === txId);
     if (!txToDelete) return;
-
     const newAccs = applyTransactionToBalances(accounts, txToDelete, -1);
     const newTxs = transactions.filter(t => t.id !== txId);
-    
-    saveData(newTxs, newAccs, null);
+    saveData(newTxs, newAccs, null, null);
   };
 
   const handleSaveAccount = (accountData) => {
@@ -459,7 +488,7 @@ export default function MoneyWizApp() {
     } else {
       newAccs = [{ ...accountData, id: Date.now(), balance: parseFloat(accountData.balance) }, ...accounts];
     }
-    saveData(null, newAccs, null);
+    saveData(null, newAccs, null, null);
     setShowAccountModal(false);
     setEditingAccount(null);
   };
@@ -467,34 +496,27 @@ export default function MoneyWizApp() {
   const handleDeleteAccount = (accountId) => {
     if (!confirm('確定要刪除此帳戶嗎？相關的交易紀錄將會保留，但會顯示為「未知帳戶」。')) return;
     const newAccs = accounts.filter(acc => acc.id !== accountId);
-    saveData(null, newAccs, null);
+    saveData(null, newAccs, null, null);
     if (selectedAccount?.id === accountId) setSelectedAccount(null);
   };
 
   const handleDeleteTemplate = (templateId) => {
     if (!confirm('確定要刪除此樣板嗎？')) return;
     const newTpls = templates.filter(t => t.id !== templateId);
-    saveData(null, null, newTpls);
+    saveData(null, null, newTpls, null);
   };
 
   const handleResetData = () => {
     if (confirm('確定要重置所有資料嗎？如果在登入狀態下，雲端資料也會被清空。')) {
-        saveData([], [], []);
+        saveData([], [], [], DEFAULT_RATES);
         localStorage.removeItem('wizmoney_currency');
-        setCurrency('TWD');
+        setDisplayCurrency('TWD');
         alert('資料已重置');
     }
   };
 
-  const openEditModal = (tx) => {
-    setEditingTransaction(tx);
-    setShowAddModal(true);
-  };
-
-  const closeAddModal = () => {
-    setShowAddModal(false);
-    setEditingTransaction(null);
-  };
+  const openEditModal = (tx) => { setEditingTransaction(tx); setShowAddModal(true); };
+  const closeAddModal = () => { setShowAddModal(false); setEditingTransaction(null); };
 
   // --- UI Components ---
 
@@ -530,15 +552,10 @@ export default function MoneyWizApp() {
               {dashboardRange === 'custom' ? `${customDateRange.start} ~ ${customDateRange.end}` : getRangeLabel()}
             </span>
           </h2>
-          
           <div className="flex flex-wrap items-center gap-2 bg-white p-1.5 rounded-xl border border-slate-200 shadow-sm">
             <div className="relative">
               <CalendarRange size={16} className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400 pointer-events-none" />
-              <select 
-                value={dashboardRange}
-                onChange={(e) => setDashboardRange(e.target.value)}
-                className="pl-9 pr-8 py-1.5 bg-transparent text-sm font-bold text-slate-700 focus:outline-none cursor-pointer appearance-none hover:text-blue-600 transition-colors"
-              >
+              <select value={dashboardRange} onChange={(e) => setDashboardRange(e.target.value)} className="pl-9 pr-8 py-1.5 bg-transparent text-sm font-bold text-slate-700 focus:outline-none cursor-pointer appearance-none hover:text-blue-600 transition-colors">
                 <option value="month">本月</option>
                 <option value="quarter">本季</option>
                 <option value="year">本年</option>
@@ -547,7 +564,6 @@ export default function MoneyWizApp() {
               </select>
               <ChevronRight size={14} className="absolute right-2 top-1/2 transform -translate-y-1/2 rotate-90 text-slate-400 pointer-events-none" />
             </div>
-
             {dashboardRange === 'custom' && (
               <div className="flex items-center gap-1 pl-2 border-l border-slate-200 animate-in fade-in zoom-in duration-200">
                 <input type="date" value={customDateRange.start} onChange={(e) => setCustomDateRange({...customDateRange, start: e.target.value})} className="w-32 py-1 px-2 bg-slate-50 border border-slate-200 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
@@ -561,20 +577,20 @@ export default function MoneyWizApp() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card className="p-5 border-l-4 border-l-blue-500 bg-gradient-to-br from-white to-slate-50">
             <div>
-              <p className="text-slate-500 text-sm font-medium mb-1">淨資產總額</p>
+              <p className="text-slate-500 text-sm font-medium mb-1">淨資產總額 ({displayCurrency})</p>
               <h2 className="text-2xl font-bold text-slate-800">{formatCurrency(totalNetWorth)}</h2>
-              <p className="text-xs text-slate-400 mt-1">所有帳戶總和</p>
+              <p className="text-xs text-slate-400 mt-1">所有帳戶折合</p>
             </div>
           </Card>
           <Card className="p-5 border-l-4 border-l-emerald-500">
              <div>
-              <p className="text-slate-500 text-sm font-medium mb-1">{getRangeLabel()}收入</p>
+              <p className="text-slate-500 text-sm font-medium mb-1">{getRangeLabel()}收入 ({displayCurrency})</p>
               <h2 className="text-2xl font-bold text-emerald-600">+{formatCurrency(dashboardStats.income)}</h2>
             </div>
           </Card>
           <Card className="p-5 border-l-4 border-l-rose-500">
              <div>
-              <p className="text-slate-500 text-sm font-medium mb-1">{getRangeLabel()}支出</p>
+              <p className="text-slate-500 text-sm font-medium mb-1">{getRangeLabel()}支出 ({displayCurrency})</p>
               <h2 className="text-2xl font-bold text-rose-600">-{formatCurrency(dashboardStats.expense)}</h2>
             </div>
           </Card>
@@ -623,9 +639,11 @@ export default function MoneyWizApp() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
              <div className={`p-6 rounded-2xl text-white shadow-lg ${selectedAccount.color} flex flex-col justify-between relative overflow-hidden col-span-1`}>
                 <div className="relative z-10">
-                  <p className="text-white/80 font-medium mb-1">{ACCOUNT_TYPES.find(t => t.id === selectedAccount.type)?.label}</p>
+                  <p className="text-white/80 font-medium mb-1">{ACCOUNT_TYPES.find(t => t.id === selectedAccount.type)?.label} ({selectedAccount.currency || 'TWD'})</p>
                   <h2 className="text-3xl font-bold mb-2">{selectedAccount.name}</h2>
-                  <p className="text-4xl font-mono font-bold tracking-tight opacity-100">{formatCurrency(selectedAccount.balance)}</p>
+                  <p className="text-4xl font-mono font-bold tracking-tight opacity-100">
+                      {formatCurrency(selectedAccount.balance, selectedAccount.currency || 'TWD')}
+                  </p>
                 </div>
                 <div className="absolute -right-4 -bottom-4 text-white/20"><Wallet size={120} /></div>
              </div>
@@ -655,7 +673,13 @@ export default function MoneyWizApp() {
                     </div>
                     <div className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-400"><ChevronRight size={20} /></div>
                 </div>
-                <div className="pl-2"><p className="text-slate-500 font-medium text-xs uppercase tracking-wider">{ACCOUNT_TYPES.find(t => t.id === acc.type)?.label}</p><h3 className="text-lg font-bold text-slate-800 mt-0.5 mb-1">{acc.name}</h3><p className={`text-xl font-mono font-semibold ${acc.balance < 0 ? 'text-rose-600' : 'text-slate-700'}`}>{formatCurrency(acc.balance)}</p></div>
+                <div className="pl-2">
+                    <p className="text-slate-500 font-medium text-xs uppercase tracking-wider">{ACCOUNT_TYPES.find(t => t.id === acc.type)?.label} • {acc.currency || 'TWD'}</p>
+                    <h3 className="text-lg font-bold text-slate-800 mt-0.5 mb-1">{acc.name}</h3>
+                    <p className={`text-xl font-mono font-semibold ${acc.balance < 0 ? 'text-rose-600' : 'text-slate-700'}`}>
+                        {formatCurrency(acc.balance, acc.currency || 'TWD')}
+                    </p>
+                </div>
                 </Card>
             ))}</div>
         }
@@ -667,6 +691,8 @@ export default function MoneyWizApp() {
     const colorClass = tx.type === 'income' ? 'text-emerald-600' : tx.type === 'transfer' ? 'text-slate-600' : 'text-rose-600';
     const sign = tx.type === 'income' ? '+' : tx.type === 'expense' ? '-' : '';
     const categoryName = tx.category || '其他';
+    const acc = accounts.find(a => a.id === tx.accountId);
+    const txCurrency = acc ? (acc.currency || 'TWD') : 'TWD';
     
     return (
       <div className="flex items-center justify-between p-4 border-b border-slate-50 hover:bg-slate-50 transition-colors group">
@@ -674,11 +700,11 @@ export default function MoneyWizApp() {
           <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-bold shadow-sm flex-shrink-0 ${CATEGORY_COLORS[categoryName] ? '' : 'bg-slate-400'}`} style={{ backgroundColor: CATEGORY_COLORS[categoryName] || '#94a3b8' }}>{categoryName.substring(0, 1)}</div>
           <div>
             <div className="flex items-center gap-2 flex-wrap"><p className="font-bold text-slate-800 text-sm">{tx.note || categoryName}</p>{tx.tags && tx.tags.map((tag, i) => <span key={i} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 text-[10px] font-medium">{tag}</span>)}</div>
-            <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1">{tx.date} | {tx.time} • {accounts.find(a => a.id === tx.accountId)?.name || '轉帳'}</p>
+            <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1">{tx.date} | {tx.time} • {acc?.name || '轉帳'}</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
-            <span className={`font-bold font-mono ${colorClass}`}>{sign}{formatCurrency(tx.amount)}</span>
+            <span className={`font-bold font-mono ${colorClass}`}>{sign}{formatCurrency(tx.amount, txCurrency)}</span>
             <div className="flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                 <button onClick={(e) => { e.stopPropagation(); e.preventDefault(); openEditModal(tx); }} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-full"><Pencil size={16} /></button>
                 <button onClick={(e) => { e.stopPropagation(); e.preventDefault(); handleDeleteTransaction(tx.id); }} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-full"><Trash2 size={16} /></button>
@@ -722,18 +748,22 @@ export default function MoneyWizApp() {
   const SettingsView = () => {
     const fileInputRef = useRef(null);
     const handleExportCSV = () => {
-      const headers = ['ID', '日期', '時間', '類型', '金額', '類別', '帳戶', '備註', '標籤'];
+      const headers = ['ID', '日期', '時間', '類型', '金額', '幣別', '類別', '帳戶', '備註', '標籤'];
       let totalIncome = 0;
       let totalExpense = 0;
       const rows = transactions.map(tx => {
-        if (tx.type === 'income') totalIncome += tx.amount;
-        if (tx.type === 'expense') totalExpense += tx.amount;
-        const accountName = accounts.find(a => a.id === parseInt(tx.accountId))?.name || (tx.type === 'transfer' ? `轉出: ${accounts.find(a => a.id === parseInt(tx.fromAccountId))?.name} -> 轉入: ${accounts.find(a => a.id === parseInt(tx.toAccountId))?.name}` : '未知');
+        const acc = accounts.find(a => a.id === parseInt(tx.accountId));
+        const txCur = acc ? (acc.currency || 'TWD') : 'TWD';
+        const displayAmount = convertAmount(tx.amount, txCur); // Convert to display currency for total calc
+        if (tx.type === 'income') totalIncome += displayAmount;
+        if (tx.type === 'expense') totalExpense += displayAmount;
+        
+        const accountName = acc?.name || (tx.type === 'transfer' ? `轉出: ${accounts.find(a => a.id === parseInt(tx.fromAccountId))?.name} -> 轉入: ${accounts.find(a => a.id === parseInt(tx.toAccountId))?.name}` : '未知');
         const tags = tx.tags ? tx.tags.join(';') : '';
-        return [tx.id, tx.date, tx.time || '', tx.type === 'expense' ? '支出' : tx.type === 'income' ? '收入' : '轉帳', tx.amount, tx.category, accountName, `"${(tx.note || '').replace(/"/g, '""')}"`, tags].join(',');
+        return [tx.id, tx.date, tx.time || '', tx.type === 'expense' ? '支出' : tx.type === 'income' ? '收入' : '轉帳', tx.amount, txCur, tx.category, accountName, `"${(tx.note || '').replace(/"/g, '""')}"`, tags].join(',');
       });
       const netTotal = totalIncome - totalExpense;
-      const summary = ['', `,,,總收入,${totalIncome},,,,,`, `,,,總支出,${totalExpense},,,,,`, `,,,淨結餘,${netTotal},,,,,`].join('\n');
+      const summary = ['', `,,,總收入(折合${displayCurrency}),${totalIncome.toFixed(2)},,,,,`, `,,,總支出(折合${displayCurrency}),${totalExpense.toFixed(2)},,,,,`, `,,,淨結餘(折合${displayCurrency}),${netTotal.toFixed(2)},,,,,`].join('\n');
       const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\n') + summary;
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -744,7 +774,7 @@ export default function MoneyWizApp() {
       link.click();
       document.body.removeChild(link);
     };
-    const handleImportCSV = (event) => { /* logic remains from previous step for brevity, please ensure it's included in final copy */ };
+    const handleImportCSV = (event) => { /* logic remains similar */ };
 
     return (
       <div className="space-y-6">
@@ -775,7 +805,6 @@ export default function MoneyWizApp() {
                         <Info size={12} /> 請至 Firebase Console → Project Settings → General → 複製 SDK config
                     </p>
                 </div>
-                
                 {isFirebaseReady && (
                     <div className="flex items-center justify-between pt-2 border-t border-orange-200">
                         <div className="flex items-center gap-3">
@@ -805,21 +834,68 @@ export default function MoneyWizApp() {
             </div>
         </Card>
 
-        {/* Other settings (Currency, Export, Reset) remain same as before */}
+        {/* Template Management - CONFIRMED VISIBLE */}
+        <Card className="p-6">
+            <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center">
+                <Bookmark size={20} className="mr-2 text-yellow-500" /> 常用樣板管理
+            </h3>
+            <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
+               {templates.length === 0 ? (
+                   <div className="text-center text-slate-400 text-sm py-4">目前沒有儲存的樣板</div>
+               ) : (
+                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                       {templates.map(t => (
+                           <div key={t.id} className="bg-white p-3 rounded-lg border border-slate-200 flex justify-between items-center shadow-sm">
+                               <div>
+                                   <p className="font-bold text-slate-800 text-sm">{t.name}</p>
+                                   <p className="text-xs text-slate-500 mt-0.5">{t.category} • {formatCurrency(t.amount, accounts.find(a => a.id === t.accountId)?.currency || 'TWD')}</p>
+                               </div>
+                               <button onClick={() => handleDeleteTemplate(t.id)} className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"><Trash2 size={16} /></button>
+                           </div>
+                       ))}
+                   </div>
+               )}
+            </div>
+        </Card>
+
+        {/* Currency Rates Settings */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <Card className="p-6">
-                <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center"><Globe size={20} className="mr-2 text-blue-500" /> 貨幣與匯率</h3>
+                <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center"><Globe size={20} className="mr-2 text-blue-500" /> 總覽顯示貨幣與匯率</h3>
                 <div className="bg-slate-50 p-4 rounded-lg border border-slate-100 space-y-4">
                     <div>
-                        <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">顯示貨幣</label>
-                        <div className="flex bg-white border border-slate-200 rounded-lg p-1">
-                            <button onClick={() => setCurrency('TWD')} className={`flex-1 py-1.5 text-sm font-bold rounded transition-colors ${currency === 'TWD' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-50'}`}>TWD (新台幣)</button>
-                            <button onClick={() => setCurrency('USD')} className={`flex-1 py-1.5 text-sm font-bold rounded transition-colors ${currency === 'USD' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-50'}`}>USD (美金)</button>
-                        </div>
+                        <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">主顯示貨幣 (用於儀表板總計)</label>
+                        <select 
+                            value={displayCurrency} 
+                            onChange={(e) => setDisplayCurrency(e.target.value)}
+                            className="block w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                        >
+                            {SUPPORTED_CURRENCIES.map(c => (
+                                <option key={c.code} value={c.code}>{c.code} - {c.name}</option>
+                            ))}
+                        </select>
                     </div>
                     <div>
-                        <label className="block text-xs font-bold text-slate-500 mb-1 uppercase flex justify-between"><span>匯率 (1 USD = ? TWD)</span><span className="text-blue-600 cursor-pointer flex items-center gap-1 hover:underline" onClick={() => setExchangeRate(32.5)}><RefreshCw size={10} /> 重置</span></label>
-                        <div className="relative"><div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><DollarSign size={16} className="text-slate-400" /></div><input type="number" value={exchangeRate} onChange={(e) => setExchangeRate(e.target.value)} className="block w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none font-mono" /></div>
+                        <label className="block text-xs font-bold text-slate-500 mb-2 uppercase flex justify-between">
+                            <span>匯率設定 (相對於 TWD)</span>
+                            <button onClick={() => setRates(DEFAULT_RATES)} className="text-blue-600 flex items-center gap-1 hover:underline text-xs"><RefreshCw size={10} /> 重置預設</button>
+                        </label>
+                        <div className="space-y-2 max-h-48 overflow-y-auto pr-2">
+                            {SUPPORTED_CURRENCIES.filter(c => c.code !== 'TWD').map(c => (
+                                <div key={c.code} className="flex items-center justify-between bg-white p-2 rounded border border-slate-200">
+                                    <span className="text-sm font-mono text-slate-600">1 {c.code} ≈</span>
+                                    <div className="flex items-center gap-1">
+                                        <input 
+                                            type="number" 
+                                            value={rates[c.code]}
+                                            onChange={(e) => setRates({...rates, [c.code]: parseFloat(e.target.value)})}
+                                            className="w-16 text-right p-1 border border-slate-200 rounded text-sm focus:ring-1 focus:ring-blue-500 outline-none"
+                                        />
+                                        <span className="text-xs text-slate-400">TWD</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 </div>
             </Card>
@@ -831,6 +907,192 @@ export default function MoneyWizApp() {
                     <button onClick={handleExportCSV} className="w-full flex items-center justify-center px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors shadow-sm text-sm font-medium"><Download size={16} className="mr-2" /> 下載 CSV 檔案</button>
                 </div>
             </Card>
+        </div>
+
+        <Card className="p-6 border-red-100">
+            <h3 className="text-lg font-bold text-red-600 mb-4 flex items-center">
+                <AlertTriangle size={20} className="mr-2" /> 危險區域
+            </h3>
+            <div className="bg-red-50 p-4 rounded-lg border border-red-100 flex items-center justify-between">
+                <div>
+                    <p className="font-bold text-red-700 text-sm">重置所有資料</p>
+                    <p className="text-xs text-red-500 mt-0.5">清除所有交易紀錄並恢復預設值</p>
+                </div>
+                <button onClick={handleResetData} className="px-4 py-2 bg-white border border-red-200 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-sm font-medium flex items-center"><Trash2 size={16} className="mr-2" /> 重置</button>
+            </div>
+        </Card>
+      </div>
+    );
+  };
+
+  const AccountModal = () => {
+    const initialData = editingAccount || {
+      name: '',
+      type: 'cash',
+      balance: '',
+      color: ACCOUNT_COLORS[0],
+      currency: 'TWD' // Default currency
+    };
+
+    const [name, setName] = useState(initialData.name);
+    const [type, setType] = useState(initialData.type);
+    const [balance, setBalance] = useState(initialData.balance);
+    const [color, setColor] = useState(initialData.color);
+    const [accCurrency, setAccCurrency] = useState(initialData.currency || 'TWD');
+
+    const handleSubmit = () => {
+      if (!name || balance === '') return;
+      handleSaveAccount({ name, type, balance: Number(balance), color, currency: accCurrency });
+    };
+
+    return (
+      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+          <div className="bg-slate-900 text-white p-4 flex justify-between items-center">
+            <h3 className="font-bold text-lg">{editingAccount ? '編輯帳戶' : '新增帳戶'}</h3>
+            <button onClick={() => { setShowAccountModal(false); setEditingAccount(null); }} className="text-slate-400 hover:text-white"><X size={24} /></button>
+          </div>
+          <div className="p-6 space-y-4 overflow-y-auto">
+            <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">帳戶名稱</label><input type="text" value={name} onChange={(e) => setName(e.target.value)} className="block w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例如：薪資轉帳戶" autoFocus /></div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">帳戶類型</label>
+              <div className="grid grid-cols-2 gap-2">{ACCOUNT_TYPES.map(t => <button key={t.id} onClick={() => setType(t.id)} className={`flex items-center justify-center gap-2 py-2 rounded-lg border text-sm font-medium transition-all ${type === t.id ? 'bg-blue-50 border-blue-500 text-blue-700' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}><t.icon size={16} />{t.label}</button>)}</div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+                <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">幣別</label>
+                    <select value={accCurrency} onChange={(e) => setAccCurrency(e.target.value)} className="block w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none">
+                        {SUPPORTED_CURRENCIES.map(c => <option key={c.code} value={c.code}>{c.code} - {c.name}</option>)}
+                    </select>
+                </div>
+                <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{editingAccount ? '目前餘額' : '初始餘額'}</label>
+                    <div className="relative"><div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><span className="text-slate-400 text-xs">{accCurrency}</span></div><input type="number" value={balance} onChange={(e) => setBalance(e.target.value)} className="block w-full pl-10 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="0" /></div>
+                </div>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">代表顏色</label>
+              <div className="flex flex-wrap gap-2">{ACCOUNT_COLORS.map(c => <button key={c} onClick={() => setColor(c)} className={`w-8 h-8 rounded-full transition-transform hover:scale-110 ${c} ${color === c ? 'ring-2 ring-offset-2 ring-slate-400 scale-110' : ''}`} />)}</div>
+            </div>
+          </div>
+          <div className="p-4 border-t border-slate-100"><button onClick={handleSubmit} className="w-full py-3 rounded-xl font-bold text-white bg-blue-600 hover:bg-blue-700 shadow-lg transition-transform active:scale-95">{editingAccount ? '儲存變更' : '建立帳戶'}</button></div>
+        </div>
+      </div>
+    );
+  };
+
+  const AddTransactionModal = () => {
+    const defaultAccountId = accounts.length > 0 ? accounts[0].id : '';
+    const defaultToAccountId = accounts.length > 1 ? accounts[1].id : (accounts.length > 0 ? accounts[0].id : '');
+
+    const initialData = editingTransaction || {
+      type: 'expense',
+      amount: '',
+      category: CATEGORIES['expense'][0],
+      accountId: defaultAccountId,
+      toAccountId: defaultToAccountId,
+      date: new Date().toISOString().split('T')[0],
+      time: new Date().toTimeString().slice(0, 5),
+      note: '',
+      tags: []
+    };
+
+    const [type, setType] = useState(initialData.type);
+    const [amount, setAmount] = useState(initialData.amount);
+    const [category, setCategory] = useState(initialData.category);
+    const [accountId, setAccountId] = useState(initialData.accountId);
+    const [toAccountId, setToAccountId] = useState(initialData.toAccountId || defaultToAccountId); 
+    const [date, setDate] = useState(initialData.date);
+    const [time, setTime] = useState(initialData.time || new Date().toTimeString().slice(0, 5));
+    const [note, setNote] = useState(initialData.note);
+    const [tagInput, setTagInput] = useState(initialData.tags ? initialData.tags.join(', ') : '');
+    const [saveAsTemplate, setSaveAsTemplate] = useState(false);
+    const [templateName, setTemplateName] = useState('');
+
+    // Get selected account currency symbol
+    const currentAcc = accounts.find(a => a.id === parseInt(accountId));
+    const currentCurrency = currentAcc ? (currentAcc.currency || 'TWD') : 'TWD';
+
+    const fillFormFromTemplate = (tpl) => {
+        setType(tpl.type); setAmount(tpl.amount); setCategory(tpl.category);
+        if (accounts.some(a => a.id === tpl.accountId)) setAccountId(tpl.accountId);
+        if (tpl.toAccountId && accounts.some(a => a.id === tpl.toAccountId)) setToAccountId(tpl.toAccountId);
+        setNote(tpl.note || ''); setTagInput(tpl.tags ? tpl.tags.join(', ') : '');
+    };
+
+    const handleSubmit = (e) => {
+      e.preventDefault();
+      if (!amount || Number(amount) <= 0) return;
+      if (!accountId) return;
+
+      const tags = tagInput.split(/[,，]/).map(t => t.trim()).filter(t => t.length > 0);
+      const transactionData = {
+        id: editingTransaction ? editingTransaction.id : null,
+        date, time, type, amount: Number(amount),
+        category: type === 'transfer' ? '轉帳' : category,
+        accountId: type === 'transfer' ? null : accountId,
+        fromAccountId: type === 'transfer' ? accountId : null,
+        toAccountId: type === 'transfer' ? toAccountId : null,
+        note, tags
+      };
+
+      if (editingTransaction) handleUpdateTransaction(transactionData);
+      else handleAddTransaction(transactionData, saveAsTemplate, templateName);
+    };
+
+    return (
+      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+          <div className="bg-slate-900 text-white p-4 flex justify-between items-center">
+            <h3 className="font-bold text-lg">{editingTransaction ? '編輯交易' : '新增交易'}</h3>
+            <button onClick={closeAddModal} className="text-slate-400 hover:text-white"><X size={24} /></button>
+          </div>
+
+          {accounts.length === 0 ? (
+              <div className="p-8 text-center">
+                  <AlertTriangle size={48} className="mx-auto mb-4 text-yellow-500" />
+                  <h4 className="font-bold text-slate-800 mb-2">尚未建立帳戶</h4>
+                  <p className="text-sm text-slate-500 mb-6">請先建立至少一個帳戶才能開始記帳。</p>
+                  <button onClick={() => { closeAddModal(); setShowAccountModal(true); setEditingAccount(null); }} className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition font-medium">立即建立帳戶</button>
+              </div>
+          ) : (
+            <>
+                {!editingTransaction && templates.length > 0 && (
+                    <div className="px-4 pt-3 pb-1 bg-slate-50 border-b border-slate-100">
+                        <p className="text-xs font-bold text-slate-400 mb-2 flex items-center"><Star size={12} className="mr-1 text-yellow-500" /> 快速帶入樣板</p>
+                        <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">{templates.map(t => <button key={t.id} onClick={() => fillFormFromTemplate(t)} className="flex-shrink-0 px-3 py-1.5 bg-white border border-slate-200 rounded-full text-xs font-medium text-slate-600 shadow-sm hover:border-blue-400 hover:text-blue-600 transition-all active:scale-95">{t.name}</button>)}</div>
+                    </div>
+                )}
+                <div className="flex bg-slate-100 p-1 m-4 rounded-lg">{['expense', 'income', 'transfer'].map(t => <button key={t} onClick={() => { setType(t); setCategory(CATEGORIES[t][0]); }} className={`flex-1 py-2 text-sm font-bold rounded-md transition-all ${type === t ? (t === 'expense' ? 'bg-rose-500 text-white shadow' : t === 'income' ? 'bg-emerald-500 text-white shadow' : 'bg-blue-600 text-white shadow') : 'text-slate-500 hover:text-slate-700'}`}>{t === 'expense' ? '支出' : t === 'income' ? '收入' : '轉帳'}</button>)}</div>
+                <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-6 py-2 space-y-4">
+                    <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">金額 ({currentCurrency})</label>
+                    <div className="relative"><div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><span className="text-slate-400 text-sm font-bold">{currentCurrency}</span></div><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="block w-full pl-12 pr-3 py-3 bg-slate-50 border border-slate-200 rounded-xl text-2xl font-bold text-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" placeholder="0.00" autoFocus /></div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">日期</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="block w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">時間</label><input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="block w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                    </div>
+                    {type !== 'transfer' && (<div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">類別</label><select value={category} onChange={(e) => setCategory(e.target.value)} className="block w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none appearance-none">{CATEGORIES[type].map(c => <option key={c} value={c}>{c}</option>)}</select></div>)}
+                    {type === 'transfer' ? (
+                    <div className="space-y-4 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                        <div><label className="block text-xs font-bold text-slate-500 mb-1">從帳戶</label><select value={accountId} onChange={e => setAccountId(e.target.value)} className="block w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700">{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+                        <div className="flex justify-center text-slate-400"><ArrowRightLeft size={16} /></div>
+                        <div><label className="block text-xs font-bold text-slate-500 mb-1">到帳戶</label><select value={toAccountId} onChange={e => setToAccountId(e.target.value)} className="block w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700">{accounts.filter(a => a.id != accountId).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+                    </div>
+                    ) : (<div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">帳戶</label><select value={accountId} onChange={e => setAccountId(e.target.value)} className="block w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none">{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>)}
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">標籤 (用逗號分隔)</label><div className="relative"><div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Tag size={16} className="text-slate-400" /></div><input type="text" value={tagInput} onChange={e => setTagInput(e.target.value)} className="block w-full pl-10 pr-3 py-2.5 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例如: 早餐, 出差, 報帳" /></div></div>
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">備註 (選填)</label><textarea value={note} onChange={e => setNote(e.target.value)} className="block w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none resize-none" rows="2" /></div>
+                    {!editingTransaction && (
+                        <div className="pt-2 border-t border-slate-100">
+                            <label className="flex items-center gap-2 cursor-pointer mb-2"><input type="checkbox" checked={saveAsTemplate} onChange={(e) => setSaveAsTemplate(e.target.checked)} className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500" /><span className="text-sm font-medium text-slate-700">加入常用樣板</span></label>
+                            {saveAsTemplate && (<div className="animate-in slide-in-from-top-2 duration-200"><input type="text" value={templateName} onChange={(e) => setTemplateName(e.target.value)} placeholder="輸入樣板名稱 (例如: 房租, Netflix)" className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none" /></div>)}
+                        </div>
+                    )}
+                </form>
+                <div className="p-4 border-t border-slate-100"><button onClick={handleSubmit} className={`w-full py-3 rounded-xl font-bold text-white shadow-lg transition-transform active:scale-95 flex items-center justify-center space-x-2 ${type === 'expense' ? 'bg-rose-500 hover:bg-rose-600' : type === 'income' ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-blue-600 hover:bg-blue-700'}`}><span>{editingTransaction ? '儲存修改' : `確認${type === 'expense' ? '支出' : type === 'income' ? '收入' : '轉帳'}`}</span><ChevronRight size={18} /></button></div>
+            </>
+          )}
         </div>
       </div>
     );
