@@ -205,6 +205,7 @@ export default function MoneyWizApp() {
 
   // --- Firebase State ---
   const [firebaseConfigStr, setFirebaseConfigStr] = useState(() => localStorage.getItem('wizmoney_firebase_config') || '');
+  const [configError, setConfigError] = useState(''); // Error state for parsing
   const [user, setUser] = useState(null);
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
@@ -212,28 +213,44 @@ export default function MoneyWizApp() {
 
   // --- Initialization ---
 
+  // 1. Initialize Firebase if config exists
   useEffect(() => {
-    if (firebaseConfigStr) {
+    if (firebaseConfigStr && firebaseConfigStr.trim().length > 0) {
       try {
-        let cleanConfig = firebaseConfigStr;
+        let cleanConfig = firebaseConfigStr.trim();
+        // Remove "const firebaseConfig =" part if present
         if (cleanConfig.includes('=')) {
             cleanConfig = cleanConfig.substring(cleanConfig.indexOf('=') + 1).trim();
-            if (cleanConfig.endsWith(';')) cleanConfig = cleanConfig.slice(0, -1);
         }
-        const config = JSON.parse(cleanConfig);
+        // Remove trailing semicolon
+        if (cleanConfig.endsWith(';')) {
+            cleanConfig = cleanConfig.slice(0, -1);
+        }
+
+        // Use Function constructor to parse JS object literal string
+        // This is safer than eval for this context and handles unquoted keys
+        const config = (new Function("return " + cleanConfig))();
+        
+        // Initialize only if not already initialized or config changed
         const app = initializeApp(config);
         setAuth(getAuth(app));
         setDb(getFirestore(app));
         setIsFirebaseReady(true);
+        setConfigError(''); // Clear error on success
       } catch (e) {
         console.error("Firebase Init Error:", e);
+        setConfigError('設定格式錯誤，請確保複製完整的 const firebaseConfig = { ... }; 內容');
+        setIsFirebaseReady(false);
         loadFromLocalStorage();
       }
     } else {
+        setIsFirebaseReady(false);
+        setConfigError('');
         loadFromLocalStorage();
     }
   }, [firebaseConfigStr]);
 
+  // 2. Listen for Auth State Changes
   useEffect(() => {
     if (!auth) return;
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -245,6 +262,7 @@ export default function MoneyWizApp() {
     return () => unsubscribe();
   }, [auth]);
 
+  // 3. Real-time Database Sync (Firestore)
   useEffect(() => {
     if (!user || !db) return;
     const docRef = doc(db, "users", user.uid);
@@ -405,7 +423,7 @@ export default function MoneyWizApp() {
   // --- Handlers ---
 
   const handleAuthLogin = async () => {
-      if (!auth) return alert("請先在下方貼上 Firebase Config 並確認");
+      if (!auth) return alert("請先在下方貼上 Firebase Config 並確認已連線");
       const provider = new GoogleAuthProvider();
       try {
           await signInWithPopup(auth, provider);
@@ -427,14 +445,7 @@ export default function MoneyWizApp() {
       } else if (tx.type === 'transfer') {
         if (acc.id === parseInt(tx.fromAccountId)) newBalance -= Number(tx.amount) * multiplier;
         if (acc.id === parseInt(tx.toAccountId)) {
-            // For transfer between different currencies, we need complex logic.
-            // Simplified: We assume amount is in Source Currency. 
-            // Target account gets converted amount? This is tricky for simple UI.
-            // Current Logic: Amount is absolute number. 
-            // Improved Logic: If multi-currency transfer, we ideally need 'targetAmount'.
-            // For now, we assume 1:1 transfer value if currencies match, or just plain number if not (User beware).
-            // To fix properly, transfer modal needs 'Exchange Rate' or 'Target Amount'.
-            // Let's keep it simple: Transfer amount applies directly to both.
+            // Simplified transfer: Transfer amount applies directly to both.
             newBalance += Number(tx.amount) * multiplier;
         }
       }
@@ -804,7 +815,9 @@ export default function MoneyWizApp() {
                     <p className="text-xs text-orange-600/70 mt-2 flex items-center gap-1">
                         <Info size={12} /> 請至 Firebase Console → Project Settings → General → 複製 SDK config
                     </p>
+                    {configError && <p className="text-xs text-red-500 font-bold">{configError}</p>}
                 </div>
+                
                 {isFirebaseReady && (
                     <div className="flex items-center justify-between pt-2 border-t border-orange-200">
                         <div className="flex items-center gap-3">
@@ -906,6 +919,38 @@ export default function MoneyWizApp() {
                     <p className="text-xs text-slate-500 mt-1 mb-3">通用格式，可使用 Excel、Numbers 或 Google Sheets 開啟。</p>
                     <button onClick={handleExportCSV} className="w-full flex items-center justify-center px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors shadow-sm text-sm font-medium"><Download size={16} className="mr-2" /> 下載 CSV 檔案</button>
                 </div>
+            
+                <div className="bg-slate-50 p-4 rounded-lg border border-slate-100 mt-4">
+                    <div className="flex justify-between items-start mb-2">
+                        <div>
+                            <p className="font-bold text-slate-700 text-sm">匯入 CSV 檔案</p>
+                            <p className="text-xs text-slate-500 mt-0.5">支援自訂欄位對應</p>
+                        </div>
+                        <FileText size={18} className="text-slate-400" />
+                    </div>
+                    <input 
+                        type="file" 
+                        accept=".csv" 
+                        ref={fileInputRef}
+                        onChange={handleImportCSV}
+                        className="hidden" 
+                    />
+                    <button 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="w-full flex items-center justify-center px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors shadow-sm text-sm font-medium"
+                    >
+                        <Upload size={16} className="mr-2" />
+                        選擇 CSV 檔案
+                    </button>
+                </div>
+
+                {importStatus && (
+                    <div className={`mt-4 p-3 rounded-lg text-xs font-medium flex items-center
+                        ${importStatus.type === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
+                        {importStatus.type === 'success' ? <Check size={14} className="mr-1.5" /> : <X size={14} className="mr-1.5" />}
+                        {importStatus.message}
+                    </div>
+                )}
             </Card>
         </div>
 
