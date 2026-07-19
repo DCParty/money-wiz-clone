@@ -61,6 +61,10 @@ const INITIAL_ACCOUNTS = [];
 const INITIAL_TRANSACTIONS = [];
 const INITIAL_TEMPLATES = [];
 
+// ID 比對統一入口：歷史資料中 id 可能是數字或字串（select 的 value 一律是字串），
+// 一律轉成字串比對，避免 1764050004743 === "1764050004743" 為 false 的同步失效問題。
+const sameId = (a, b) => a !== null && a !== undefined && b !== null && b !== undefined && String(a) === String(b);
+
 // Supported Currencies Configuration
 const SUPPORTED_CURRENCIES = [
   { code: 'TWD', symbol: 'NT$', name: '新台幣' },
@@ -366,7 +370,7 @@ export default function MoneyWizApp() {
     let expense = 0;
     transactions.forEach(t => {
       if (isTxInDashboardRange(t)) {
-        const acc = accounts.find(a => a.id === t.accountId);
+        const acc = accounts.find(a => sameId(a.id, t.accountId));
         const txCurrency = acc ? (acc.currency || 'TWD') : 'TWD';
         const convertedAmount = convertAmount(t.amount, txCurrency);
 
@@ -380,7 +384,7 @@ export default function MoneyWizApp() {
   const categoryData = useMemo(() => {
     const data = {};
     transactions.filter(t => t.type === 'expense' && isTxInDashboardRange(t)).forEach(t => {
-      const acc = accounts.find(a => a.id === t.accountId);
+      const acc = accounts.find(a => sameId(a.id, t.accountId));
       const txCurrency = acc ? (acc.currency || 'TWD') : 'TWD';
       const convertedAmount = convertAmount(t.amount, txCurrency);
 
@@ -409,7 +413,7 @@ export default function MoneyWizApp() {
       const typeMatch = filterType === 'all' || tx.type === filterType;
       const tagMatch = !selectedTag || (tx.tags && tx.tags.includes(selectedTag));
       let accountMatch = true;
-      if (accId) accountMatch = tx.accountId === accId || tx.fromAccountId === accId || tx.toAccountId === accId;
+      if (accId) accountMatch = sameId(tx.accountId, accId) || sameId(tx.fromAccountId, accId) || sameId(tx.toAccountId, accId);
       
       // Search Logic
       const query = searchQuery.toLowerCase();
@@ -439,13 +443,13 @@ export default function MoneyWizApp() {
   const applyTransactionToBalances = (currentAccounts, tx, multiplier = 1) => {
     return currentAccounts.map(acc => {
       let newBalance = acc.balance;
-      if (tx.type === 'expense' && acc.id === parseInt(tx.accountId)) {
+      if (tx.type === 'expense' && sameId(acc.id, tx.accountId)) {
         newBalance -= Number(tx.amount) * multiplier;
-      } else if (tx.type === 'income' && acc.id === parseInt(tx.accountId)) {
+      } else if (tx.type === 'income' && sameId(acc.id, tx.accountId)) {
         newBalance += Number(tx.amount) * multiplier;
       } else if (tx.type === 'transfer') {
-        if (acc.id === parseInt(tx.fromAccountId)) newBalance -= Number(tx.amount) * multiplier;
-        if (acc.id === parseInt(tx.toAccountId)) {
+        if (sameId(acc.id, tx.fromAccountId)) newBalance -= Number(tx.amount) * multiplier;
+        if (sameId(acc.id, tx.toAccountId)) {
             newBalance += Number(tx.amount) * multiplier;
         }
       }
@@ -650,24 +654,29 @@ export default function MoneyWizApp() {
   };
 
   const AccountsView = () => {
-    if (selectedAccount) {
-      const accountTxs = getFilteredTransactions(selectedAccount.id);
+    // 永遠從最新的 accounts state 取出目前選中的帳戶，
+    // 避免 selectedAccount 抓到舊快照導致明細頁餘額不更新。
+    const liveAccount = selectedAccount
+      ? (accounts.find(a => sameId(a.id, selectedAccount.id)) || selectedAccount)
+      : null;
+    if (liveAccount) {
+      const accountTxs = getFilteredTransactions(liveAccount.id);
       return (
         <div className="flex flex-col h-full">
           <div className="flex justify-between items-center mb-6">
             <button onClick={() => setSelectedAccount(null)} className="flex items-center text-slate-500 hover:text-slate-800 transition-colors font-bold"><ChevronLeft size={20} className="mr-1" /> 返回列表</button>
             <div className="flex space-x-2">
-              <button onClick={() => { setEditingAccount(selectedAccount); setShowAccountModal(true); }} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg"><Pencil size={20} /></button>
-              <button onClick={() => handleDeleteAccount(selectedAccount.id)} className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg"><Trash2 size={20} /></button>
+              <button onClick={() => { setEditingAccount(liveAccount); setShowAccountModal(true); }} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg"><Pencil size={20} /></button>
+              <button onClick={() => handleDeleteAccount(liveAccount.id)} className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg"><Trash2 size={20} /></button>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-             <div className={`p-6 rounded-2xl text-white shadow-lg ${selectedAccount.color} flex flex-col justify-between relative overflow-hidden col-span-1`}>
+             <div className={`p-6 rounded-2xl text-white shadow-lg ${liveAccount.color} flex flex-col justify-between relative overflow-hidden col-span-1`}>
                 <div className="relative z-10">
-                  <p className="text-white/80 font-medium mb-1">{ACCOUNT_TYPES.find(t => t.id === selectedAccount.type)?.label} ({selectedAccount.currency || 'TWD'})</p>
-                  <h2 className="text-3xl font-bold mb-2">{selectedAccount.name}</h2>
+                  <p className="text-white/80 font-medium mb-1">{ACCOUNT_TYPES.find(t => t.id === liveAccount.type)?.label} ({liveAccount.currency || 'TWD'})</p>
+                  <h2 className="text-3xl font-bold mb-2">{liveAccount.name}</h2>
                   <p className="text-4xl font-mono font-bold tracking-tight opacity-100">
-                      {formatCurrency(selectedAccount.balance, selectedAccount.currency || 'TWD')}
+                      {formatCurrency(liveAccount.balance, liveAccount.currency || 'TWD')}
                   </p>
                 </div>
                 <div className="absolute -right-4 -bottom-4 text-white/20"><Wallet size={120} /></div>
@@ -742,7 +751,7 @@ export default function MoneyWizApp() {
     const colorClass = tx.type === 'income' ? 'text-emerald-600' : tx.type === 'transfer' ? 'text-slate-600' : 'text-rose-600';
     const sign = tx.type === 'income' ? '+' : tx.type === 'expense' ? '-' : '';
     const categoryName = tx.category || '其他';
-    const acc = accounts.find(a => a.id === tx.accountId);
+    const acc = accounts.find(a => sameId(a.id, tx.accountId));
     const txCurrency = acc ? (acc.currency || 'TWD') : 'TWD';
     
     return (
@@ -830,13 +839,13 @@ export default function MoneyWizApp() {
       let totalIncome = 0;
       let totalExpense = 0;
       const rows = transactions.map(tx => {
-        const acc = accounts.find(a => a.id === parseInt(tx.accountId));
+        const acc = accounts.find(a => sameId(a.id, tx.accountId));
         const txCur = acc ? (acc.currency || 'TWD') : 'TWD';
         const displayAmount = convertAmount(tx.amount, txCur); 
         if (tx.type === 'income') totalIncome += displayAmount;
         if (tx.type === 'expense') totalExpense += displayAmount;
         
-        const accountName = acc?.name || (tx.type === 'transfer' ? `轉出: ${accounts.find(a => a.id === parseInt(tx.fromAccountId))?.name} -> 轉入: ${accounts.find(a => a.id === parseInt(tx.toAccountId))?.name}` : '未知');
+        const accountName = acc?.name || (tx.type === 'transfer' ? `轉出: ${accounts.find(a => sameId(a.id, tx.fromAccountId))?.name} -> 轉入: ${accounts.find(a => sameId(a.id, tx.toAccountId))?.name}` : '未知');
         const tags = tx.tags ? tx.tags.join(';') : '';
         return [tx.id, tx.date, tx.time || '', tx.type === 'expense' ? '支出' : tx.type === 'income' ? '收入' : '轉帳', tx.amount, txCur, tx.category, accountName, `"${(tx.note || '').replace(/"/g, '""')}"`, tags].join(',');
       });
@@ -939,7 +948,7 @@ export default function MoneyWizApp() {
                            <div key={t.id} className="bg-white p-3 rounded-lg border border-slate-200 flex justify-between items-center shadow-sm">
                                <div>
                                    <p className="font-bold text-slate-800 text-sm">{t.name}</p>
-                                   <p className="text-xs text-slate-500 mt-0.5">{t.category} • {formatCurrency(t.amount, accounts.find(a => a.id === t.accountId)?.currency || 'TWD')}</p>
+                                   <p className="text-xs text-slate-500 mt-0.5">{t.category} • {formatCurrency(t.amount, accounts.find(a => sameId(a.id, t.accountId))?.currency || 'TWD')}</p>
                                </div>
                                <button onClick={() => handleDeleteTemplate(t.id)} className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"><Trash2 size={16} /></button>
                            </div>
@@ -1105,7 +1114,8 @@ export default function MoneyWizApp() {
   };
 
   const AddTransactionModal = () => {
-    const defaultAccountId = accounts.length > 0 ? accounts[0].id : '';
+    // 若正在瀏覽某個帳戶的明細，新增交易預設就記在該帳戶上
+    const defaultAccountId = (selectedAccount && selectedAccount.id) || (accounts.length > 0 ? accounts[0].id : '');
     const defaultToAccountId = accounts.length > 1 ? accounts[1].id : (accounts.length > 0 ? accounts[0].id : '');
 
     const initialData = editingTransaction || {
@@ -1133,7 +1143,9 @@ export default function MoneyWizApp() {
     // Initial amount formatting if existing
     const [amount, setAmount] = useState(initialData.amount ? formatNumberString(initialData.amount) : '');
     const [category, setCategory] = useState(initialData.category);
-    const [accountId, setAccountId] = useState(initialData.accountId);
+    // 轉帳交易的 accountId 存的是 null（實際帳戶在 fromAccountId），
+    // 編輯轉帳時若不回填 fromAccountId，儲存會因 !accountId 被靜默擋下。
+    const [accountId, setAccountId] = useState(initialData.accountId ?? initialData.fromAccountId ?? defaultAccountId);
     const [toAccountId, setToAccountId] = useState(initialData.toAccountId || defaultToAccountId); 
     const [date, setDate] = useState(initialData.date);
     const [time, setTime] = useState(initialData.time || new Date().toTimeString().slice(0, 5));
@@ -1143,15 +1155,15 @@ export default function MoneyWizApp() {
     const [templateName, setTemplateName] = useState('');
 
     // Get selected account currency symbol
-    const currentAcc = accounts.find(a => a.id === parseInt(accountId));
+    const currentAcc = accounts.find(a => sameId(a.id, accountId));
     const currentCurrency = currentAcc ? (currentAcc.currency || 'TWD') : 'TWD';
 
     const fillFormFromTemplate = (tpl) => {
         setType(tpl.type); 
         setAmount(formatNumberString(tpl.amount)); 
         setCategory(tpl.category);
-        if (accounts.some(a => a.id === tpl.accountId)) setAccountId(tpl.accountId);
-        if (tpl.toAccountId && accounts.some(a => a.id === tpl.toAccountId)) setToAccountId(tpl.toAccountId);
+        if (accounts.some(a => sameId(a.id, tpl.accountId))) setAccountId(tpl.accountId);
+        if (tpl.toAccountId && accounts.some(a => sameId(a.id, tpl.toAccountId))) setToAccountId(tpl.toAccountId);
         setNote(tpl.note || ''); 
         setTagInput(tpl.tags ? tpl.tags.join(', ') : '');
     };
